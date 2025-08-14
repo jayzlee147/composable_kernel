@@ -153,6 +153,11 @@ struct BlockFmhaPipelineQRKSVS
                const SAccElementFunction& s_acc_element_func,
                const PComputeElementFunction& p_compute_element_func,
                const OAccElementFunction& o_acc_element_func,
+               const float descale_q,
+               const float* descale_k_ptr,
+               const float* descale_v_ptr,
+               ck_tile::index_t stride_descale_k,
+               ck_tile::index_t stride_descale_v,
                FmhaMask mask,
                PositionEncoding position_encoding,
                float scale_s,
@@ -286,6 +291,14 @@ struct BlockFmhaPipelineQRKSVS
         static_assert(1 <= k1_loops);
         do
         {
+            float descale_k = *(descale_k_ptr + i_total_loops * kN0 / 128 * stride_descale_k);
+            float descale_v = *(descale_v_ptr + i_total_loops * kN0 / 128 * stride_descale_v);
+            if constexpr(0)
+            // if (threadIdx.x==0 && blockIdx.y==0)
+            printf("FmhaFwdKernel descale kv(%d): %f, %f.\n", i_total_loops * kN0 / 128,
+                descale_k,
+                descale_v
+            );
             // STAGE 1, QK gemm
             auto k_dram_window = make_tile_window(
                 k_dram_block_window.get_bottom_tensor_view(),
@@ -352,6 +365,8 @@ struct BlockFmhaPipelineQRKSVS
                                       sequence<kM0, k0_loops * kK0>{}),
                        k_lds_window);
             }
+
+            tile_elementwise_inout([descale_q, descale_k](auto& x) { x = x * descale_q * descale_k; }, s_acc);
 
             // STAGE 2, scale_s, add bias, mask, softmax
             if constexpr(BiasEnum == BlockAttentionBiasEnum::ELEMENTWISE_BIAS)
@@ -509,30 +524,33 @@ struct BlockFmhaPipelineQRKSVS
             constexpr auto o_spans = decltype(o_acc)::get_distributed_spans();
             sweep_tile_span(o_spans[number<0>{}], [&](auto idx0) {
                 constexpr auto i_idx = make_tuple(idx0);
+                const auto diff_m = m_old[i_idx] - get_validated_m(m[i_idx]);
 #if CK_TILE_FMHA_FWD_FAST_EXP2
                 const auto tmp = [&]() {
                     if constexpr(BiasEnum == BlockAttentionBiasEnum::ELEMENTWISE_BIAS ||
                                  BiasEnum == BlockAttentionBiasEnum::ALIBI)
                     {
-                        return exp2(m_old[i_idx] - get_validated_m(m[i_idx]));
+                        return exp2(diff_m);
                     }
                     else
                     {
                         if constexpr(kHasLogitsSoftCap)
                         {
 
-                            return exp2(m_old[i_idx] - get_validated_m(m[i_idx]));
+                            return exp2(diff_m);
                         }
                         else
                         {
-                            auto row_max = scale_s * get_validated_m(m[i_idx]);
-                            return exp2(scale_s * m_old[i_idx] - row_max);
+                            return exp2(scale_s * diff_m);
                         }
                     }
                 }();
 #else
                 const auto tmp       = exp(m_old[i_idx] - get_validated_m(m[i_idx]));
 #endif
+                // if (blockIdx.y==14 && threadIdx.x==72)
+                //     printf("@@@@@i_total_loops=%d, tmp=%f, l[i_idx]=%f, rowsum_p[i_idx]=%f.\n",
+                //     i_total_loops, tmp, l[i_idx], rowsum_p[i_idx]);
                 l(i_idx) = tmp * l[i_idx] + rowsum_p[i_idx];
                 sweep_tile_span(o_spans[number<1>{}], [&](auto idx1) {
                     constexpr auto i_j_idx = make_tuple(idx0, idx1);
@@ -575,10 +593,17 @@ struct BlockFmhaPipelineQRKSVS
                 static_for<0, k1_loops - 1, 1>{}([&](auto i_k1) {
                     const auto v = load_tile(v_dram_window); // load next v
                     block_sync_lds();
-                    gemm_1(o_acc,
+                    auto o_acc0 = gemm_1(
                            get_slice_tile(
                                p, sequence<0, i_k1 * kK1>{}, sequence<kM0, (i_k1 + 1) * kK1>{}),
                            v_lds_window);
+                    tile_elementwise_inout([&descale_v, i_k1, i_total_loops](auto& o, auto o0)
+                    {
+                        if (blockIdx.y==14 && threadIdx.x==72)
+                        printf("@@@@@ i_k1=%d, i_total_loops=%d, o=%f, o0=%f, descale_v=%f.\n",
+                            i_k1.value, i_total_loops, o, o0, descale_v);
+                        o += o0 * descale_v;
+                    }, o_acc, o_acc0);
                     block_sync_lds();
                     if constexpr(std::is_same_v<VLayout, ck_tile::tensor_layout::gemm::RowMajor>)
                     {
@@ -602,11 +627,20 @@ struct BlockFmhaPipelineQRKSVS
             // tail
             {
                 block_sync_lds();
-                gemm_1(o_acc,
+                auto o_acc0 = gemm_1(
                        get_slice_tile(p, sequence<0, (k1_loops - 1) * kK1>{}, sequence<kM0, kN0>{}),
                        v_lds_window);
+                tile_elementwise_inout([&descale_v, i_total_loops](auto& o, auto o0)
+                {
+                    if (blockIdx.y==14 && threadIdx.x==72)
+                    printf("@@@@@ tail, i_total_loops=%d, o=%f, o0=%f, descale_v=%f.\n",
+                        i_total_loops, o, o0, descale_v);
+                    o += o0 * descale_v;
+                }, o_acc, o_acc0);
                 block_sync_lds();
             }
+            // tile_elementwise_inout([&descale_v](auto& o) {o = o*descale_v;}, o_acc);
+            // tile_elementwise_inout([&descale_v](auto& o, auto o0) { o += o0 * descale_v; }, o_acc, o_acc0);
         } while(++i_total_loops < num_total_loop);
 
         // store lse
@@ -631,6 +665,7 @@ struct BlockFmhaPipelineQRKSVS
                     }
                     else
                     {
+                        // if (threadIdx.x==0 && blockIdx.y==0) printf("kStoreLSE2..");
                         lse(i_idx) = m_[i_idx] * scale_s / C_LOG2E + log(l_[i_idx]);
                     }
                 }
@@ -657,7 +692,12 @@ struct BlockFmhaPipelineQRKSVS
             }();
             sweep_tile_span(o_spans[number<1>{}], [&](auto idx1) {
                 constexpr auto i_j_idx = make_tuple(idx0, idx1);
+                const auto ori = o_acc(i_j_idx);
                 o_acc(i_j_idx) *= tmp;
+                if (isnan(o_acc(i_j_idx)))
+                printf("@@@o_spans blockIdx.y=%u, threadIdx.x=%u, ori=%f, tmp=%f, o_acc(i_j_idx)=%f.\n",
+                    blockIdx.y, threadIdx.x, ori, tmp, o_acc(i_j_idx));
+
             });
         });
 
