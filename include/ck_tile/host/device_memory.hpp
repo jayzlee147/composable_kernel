@@ -91,6 +91,8 @@ struct DeviceMem
             mpDeviceBuf = nullptr;
         }
     }
+    template<typename T>
+    T* GetDeviceBuffer() const { return reinterpret_cast<T*>(mpDeviceBuf); }
     void* GetDeviceBuffer() const { return mpDeviceBuf; }
     std::size_t GetBufferSize() const { return mMemSize; }
     void ToDevice(const void* p) const

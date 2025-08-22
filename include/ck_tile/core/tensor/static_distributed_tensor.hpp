@@ -184,7 +184,7 @@ set_tile_if(static_distributed_tensor<DataType, StaticTileDistribution>& out_ten
             const auto x_indices = get_x_indices_from_distributed_indices(StaticTileDistribution{},
                                                                           distributed_indices);
 
-            if(predicate(x_indices))
+            if(predicate(x_indices, out_tensor(distributed_indices)))
             {
                 out_tensor(distributed_indices) = value;
             }

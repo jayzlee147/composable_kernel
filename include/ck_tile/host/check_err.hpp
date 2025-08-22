@@ -226,6 +226,18 @@ CK_TILE_HOST void report_error_stats(int err_count, double max_err, std::size_t 
     std::cerr << ", " << error_percent << "% wrong values" << std::endl;
 }
 
+void multi_index000(const auto iii, const auto& out, auto global_i, auto o, auto r) {
+    return;
+    std::cout << iii << "  [";
+    for (std::size_t rj=0;rj<out.get_num_of_dimension();rj++) {
+        if (rj!=0) std::cout << ", ";
+        std::cout << (global_i / out.get_stride(rj)) % out.get_length(rj);
+    }
+    std::cout << "]";
+    std::cout << std::setw(12) << std::setprecision(7) << "  out=" << o
+        << ", ref=" << r << std::endl;
+}
+
 /**
  * @brief Check errors between floating point ranges using the specified tolerances.
  *
@@ -276,6 +288,7 @@ check_err(const Range& out,
         const double o = *std::next(std::begin(out), i);
         const double r = *std::next(std::begin(ref), i);
         err            = std::abs(o - r);
+        multi_index000(2, ref, i, o, r);
         if(err > atol + rtol * std::abs(r) || is_infinity_error(o, r))
         {
             max_err = err > max_err ? err : max_err;
@@ -344,6 +357,7 @@ check_err(const Range& out,
         const double o = type_convert<float>(*std::next(std::begin(out), i));
         const double r = type_convert<float>(*std::next(std::begin(ref), i));
         err            = std::abs(o - r);
+        multi_index000(3, ref, i, o, r);
         if(err > atol + rtol * std::abs(r) || is_infinity_error(o, r))
         {
             max_err = err > max_err ? err : max_err;
@@ -412,6 +426,7 @@ check_err(const Range& out,
         const double o = type_convert<float>(*std::next(std::begin(out), i));
         const double r = type_convert<float>(*std::next(std::begin(ref), i));
         err            = std::abs(o - r);
+        multi_index000(4, ref, i, o, r);
         if(err > atol + rtol * std::abs(r) || is_infinity_error(o, r))
         {
             max_err = err > max_err ? err : max_err;
@@ -473,7 +488,7 @@ std::enable_if_t<(std::is_same_v<ranges::range_value_t<Range>, ranges::range_val
         const int64_t o = *std::next(std::begin(out), i);
         const int64_t r = *std::next(std::begin(ref), i);
         err             = std::abs(o - r);
-
+        multi_index000(5, ref, i, o, r);
         if(err > atol)
         {
             max_err = err > max_err ? err : max_err;
@@ -558,6 +573,7 @@ std::enable_if_t<(std::is_same_v<ranges::range_value_t<Range>, ranges::range_val
         const double o_fp64 = type_convert<float>(o_fp8);
         const double r_fp64 = type_convert<float>(r_fp8);
         err                 = std::abs(o_fp64 - r_fp64);
+        multi_index000(6, ref, i, o_fp64, r_fp64);
         if(!(less_equal<double>{}(err, atol) ||
              get_rounding_point_distance(o_fp8, r_fp8) <= max_rounding_point_distance) ||
            is_infinity_error(o_fp64, r_fp64))
@@ -626,6 +642,7 @@ std::enable_if_t<(std::is_same_v<ranges::range_value_t<Range>, ranges::range_val
         const double o = type_convert<float>(*std::next(std::begin(out), i));
         const double r = type_convert<float>(*std::next(std::begin(ref), i));
         err            = std::abs(o - r);
+        multi_index000(7, ref, i, o, r);
         if(err > atol + rtol * std::abs(r) || is_infinity_error(o, r))
         {
             max_err = err > max_err ? err : max_err;

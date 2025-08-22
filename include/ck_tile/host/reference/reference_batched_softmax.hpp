@@ -57,6 +57,8 @@ CK_TILE_HOST void reference_batched_softmax(
             const CompDataType v_b = ck_tile::exp(v_a - v_max) * inv_sum;
 
             b_b_m_n(batch, m, n) = ck_tile::type_convert<BDataType>(comp_element_op(v_b));
+            // printf("Softmax(%lu, %lu, %lu), a(%f), v_a(%f), v_max(%f), v_diff(%f), v_b(%f).\n", 
+            //     batch, m, n, a_b_m_n(batch, m, n), v_a, v_max, v_a - v_max, v_b);
         }
         // lse
         if(lse_b_m)

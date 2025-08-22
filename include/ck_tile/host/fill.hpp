@@ -439,6 +439,89 @@ struct FillConstant
     }
 };
 
+template <typename T>
+struct FillConstantRange
+{
+    std::size_t dim_{0};
+
+    template <typename ForwardIter>
+    void operator()(ForwardIter first, ForwardIter last, std::size_t length, std::size_t stride) const
+    {
+        // std::fill(first, last, value_);
+        for (std::size_t i=0;first<last;first++,i++) {
+            *first = (i / stride) % length;
+        }
+    }
+
+    template <typename ForwardRange>
+    auto operator()(ForwardRange&& range) const
+        -> std::void_t<decltype(std::declval<const FillConstantRange&>()(
+            std::begin(std::forward<ForwardRange>(range)),
+            std::end(std::forward<ForwardRange>(range)), 1, 1))>
+    {
+        std::size_t stride = range.get_stride(dim_);
+        std::size_t length = range.get_length(dim_);
+        std::cout << "FillConstantRange at dim(" << dim_ 
+            << "), with length(" << length
+            << "), and stride(" << stride
+            << ").\n";
+        (*this)(std::begin(std::forward<ForwardRange>(range)),
+                std::end(std::forward<ForwardRange>(range)), length, stride);
+    }
+};
+
+template <typename T>
+struct Show
+{
+    template <typename ForwardIter>
+    void operator()(ForwardIter first, ForwardIter last, auto& lengths, auto& strides, std::size_t rank) const
+    {
+        // std::fill(first, last, value_);
+        std::size_t first_stride = strides[0];
+        std::size_t last_stride = strides[rank];
+        std::cout << std::fixed << std::setprecision(6);
+        for (std::size_t i=0;first<last;first++,i++) {
+            bool sss = true;
+            for (std::size_t r=rank; r>0; r--)
+            {
+                auto& stride = strides[r-1];
+                auto& length = lengths[r-1];
+                if (sss && !((i / stride) % length)) std::cout << "[";
+                else sss = false;
+            }
+            std::cout << ck_tile::type_convert<T>(*std::next(first));
+            // if (((i + 1) % last_stride)) std::cout << ",";
+            bool eee = false;
+            for (std::size_t r=rank; r>0; r--)
+            {
+                auto& stride = strides[r-1];
+                auto& length = lengths[r-1];
+                if (!eee && (((i / stride) +1) % length)) std::cout << ",";
+                else std::cout << "]";
+            }
+        }
+    }
+
+    template <typename ForwardRange>
+    auto operator()(ForwardRange&& range) const
+        -> std::void_t<decltype(std::declval<const Show&>()(
+            std::begin(std::forward<ForwardRange>(range)),
+            std::end(std::forward<ForwardRange>(range)), range.get_lengths(), range.get_strides(), 0))>
+    {
+        auto& strides = range.get_strides();
+        auto& lengths = range.get_lengths();
+        std::size_t rank = range.get_num_of_dimension();
+        std::cout << "Show tensor dim(" << range.get_num_of_dimension() 
+            << "), with length(";
+        for (auto length : lengths) std::cout << length << ",";
+        std::cout << "), and stride(";
+        for (auto stride : strides) std::cout << stride << ",";
+        std::cout  << ").\n";
+        (*this)(std::begin(std::forward<ForwardRange>(range)),
+                std::end(std::forward<ForwardRange>(range)), lengths, strides, rank);
+    }
+};
+
 //----------------------------------------------------------------------------------------------
 /// @brief      Transforms given input to fit 2:4 structured sparsity pattern so
 ///             every subgroup of 4 elements contain at most 2 non-zero elements

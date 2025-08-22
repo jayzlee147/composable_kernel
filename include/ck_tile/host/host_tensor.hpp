@@ -650,6 +650,10 @@ struct HostTensor
             {
                 os << type_convert<float>(t.mData[idx]) << " #### ";
             }
+            else if constexpr(std::is_same_v<T, fp8_t>)
+            {
+                os << type_convert<float>(t.mData[idx]);
+            }
             else
             {
                 os << t.mData[idx];

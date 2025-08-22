@@ -331,6 +331,7 @@ CK_TILE_DEVICE auto cast_tile(const SrcTensor& src_tensor)
                  std::is_same_v<typename SrcTensor::DataType, float> &&
                  (SrcTensor::get_thread_buffer_size() % 4 == 0))
     {
+        // printf("cast_tile_pk_fp8_fp32...");
         return impl::cast_tile_pk_fp8_fp32<DstType, SrcTensor>(src_tensor);
     }
 #if CK_TILE_USE_PK_FP16_TILE_CAST
@@ -347,8 +348,10 @@ CK_TILE_DEVICE auto cast_tile(const SrcTensor& src_tensor)
         return impl::cast_tile_opt_subdword<DstType, SrcTensor>(src_tensor);
     }
 #endif
-    else
+    else {
+        // printf("cast_tile  tile_elementwise_in SrcTensor::get_thread_buffer_size(%u)...\n", SrcTensor::get_thread_buffer_size());
         return tile_elementwise_in(type_convert<DstType, typename SrcTensor::DataType>, src_tensor);
+    }
 }
 
 // no-op function for null_tensor arguments

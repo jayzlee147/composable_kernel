@@ -40,7 +40,7 @@ FMHA_FWD_KERNEL_HEADER = """// SPDX-License-Identifier: MIT
 
 FMHA_FWD_KERNEL_BODY="""
 using fmha_dtype_{F_idx} = {F_dtype};
-
+// kM0, kN0, kK0, kN1, kK1, kQKHeaddim
 using fmha_block_tile_{F_idx} = ck_tile::sequence<{F_bm0}, {F_bn0}, {F_bk0}, {F_bn1}, {F_bk1}, {F_bk0max}>;
 
 using fmha_shape_{F_idx} = ck_tile::TileFmhaShape<fmha_block_tile_{F_idx},
@@ -60,6 +60,7 @@ using fmha_trait_{F_idx} = ck_tile::TileFmhaTraits<{F_spad},
                                                     {F_lse},
                                                     {F_dropout},
                                                     {F_squant},
+                                                    {F_dquant},
                                                     {F_occupancy},
                                                     {F_skip}>;
 
@@ -97,7 +98,7 @@ using fmha_kernel_{F_idx} =
     ck_tile::FmhaFwdKernel<fmha_pipeline_{F_idx}, fmha_epilogue_{F_idx}>;
 
 using trait_{F_idx} = fmha_fwd_traits_<{F_hdim}, {F_dtype}, {F_mode},{F_bm0}, {F_bn0}, {F_bk0}, {F_bn1}, {F_bk1}, {F_bk0max}, {F_vlayout},
-                        {F_pipeline_enum}, {F_logits}, fmha_mask_{F_idx}, {F_bias}, {F_lse}, {F_dropout}, {F_squant}, {F_spad}, {F_skpad}, {F_dpad}, {F_dvpad}, {F_skip}>;
+                        {F_pipeline_enum}, {F_logits}, fmha_mask_{F_idx}, {F_bias}, {F_lse}, {F_dropout}, {F_squant}, {F_dquant}, {F_spad}, {F_skpad}, {F_dpad}, {F_dvpad}, {F_skip}>;
 
 #include <iostream>
 
@@ -110,6 +111,9 @@ float fmha_fwd_<trait_{F_idx}>(const ck_tile::stream_config& s, fmha_fwd_args a)
     auto [kargs, grids] = fmha_fwd_create_kargs_and_grids<k_>(a);
     constexpr dim3 blocks             = k_::BlockSize();
     constexpr ck_tile::index_t kBlockPerCu = k_::kBlockPerCu;
+    // std::cout << ", blocks(" << blocks.x << ", " << blocks.y << ", " << blocks.z
+    //        << "), grids(" << grids.x << ", " << grids.y << ", " << grids.z
+    //        << ")" << "kargs.stride_v(" << kargs.stride_v << ")";
     return ck_tile::launch_kernel(s, ck_tile::make_kernel<blocks.x, kBlockPerCu>(k_{{}}, grids, blocks, 0, kargs));
 }}
 """
@@ -146,10 +150,59 @@ unsigned get_num_thread_blocks(unsigned batch, unsigned nheads, unsigned max_seq
 
     return batch * nheads * num_m_blocks * num_n_blocks;
 }}
+
+std::ostream& operator<<(std::ostream& os, const mask_enum& me) {{
+    switch(me) {{
+        case mask_enum::no_mask: os << "no_mask";break;
+        case mask_enum::mask_top_left: os << "mask_top_left";break;
+        case mask_enum::mask_bottom_right: os << "mask_bottom_right";break;
+        case mask_enum::window_generic: os << "window_generic";break;
+    }}
+    return os;
+}}
+
+std::ostream& operator<<(std::ostream& os, const bias_enum& be) {{
+    switch(be) {{
+        case bias_enum::no_bias: os << "no_bias";break;
+        case bias_enum::elementwise_bias: os << "elementwise_bias";break;
+        case bias_enum::alibi: os << "alibi";break;
+    }}
+    return os;
+}}
+
+std::ostream& operator<<(std::ostream& os, const fmha_fwd_traits& t) {{
+    os << "\\nfmha_fwd_traits{{"
+        << "\\n\thdim_q=" << t.hdim_q
+        << ",\\n\thdim_v=" << t.hdim_v
+        << ",\\n\tdata_type=" << t.data_type
+        << ",\\n\tis_group_mode=" << t.is_group_mode
+        << ",\\n\tis_v_rowmajor=" << t.is_v_rowmajor
+        << ",\\n\thas_logits_soft_cap=" << t.has_logits_soft_cap
+        << ",\\n\tmask_type=" << t.mask_type
+        << ",\\n\tbias_type=" << t.bias_type
+        << ",\\n\thas_lse=" << t.has_lse
+        << ",\\n\thas_dropout=" << t.has_dropout
+        << ",\\n\tdo_fp8_static_quant=" << t.do_fp8_static_quant
+        << ",\\n\tfp8_dquant=" << t.fp8_dquant
+        << ",\\n\tskip_min_seqlen_q=" << t.skip_min_seqlen_q
+        << "\\n}}";
+    return os;
+}}
+
+std::ostream& operator<<(std::ostream& os, const fmha_fwd_args& a) {{
+    return os;
+}}
+
+std::ostream& operator<<(std::ostream& os, const ck_tile::stream_config& s) {{
+    return os;
+}}
+
 }} // namespace
 
 float fmha_fwd(fmha_fwd_traits t, fmha_fwd_args a, const ck_tile::stream_config& s){{
+    // std::cout << t.data_type << ", t.do_fp8_static_quant: " << t.do_fp8_static_quant << ", t.fp8_dquant: " << t.fp8_dquant << std::endl; 
     float r = -1;
+    // std::cout << t << std::endl << a << std::endl << s << std::endl;
 
     [[maybe_unused]] const float min_cu_util_rate = 0.8; // minimum CU utilization rate
 
@@ -176,9 +229,9 @@ FMHA_FWD_API_PER_HDIM_CASE="""        {F_if} (t.hdim_q <= {F_hdim} && t.hdim_v <
         }}
 """
 
-FMHA_FWD_API_INNER_DISPATCH="""            {F_if}((t.is_group_mode == {F_mode}) && (t.is_v_rowmajor == {F_vlayout}) && (t.has_logits_soft_cap == {F_logits}) && ({F_mask_check}) && (t.bias_type == {F_bias_check}) && (t.has_lse == {F_lse})  && (t.has_dropout == {F_dropout}) && (t.do_fp8_static_quant == {F_squant}) && (t.skip_min_seqlen_q == {F_skip}) &&
+FMHA_FWD_API_INNER_DISPATCH="""            {F_if}((t.is_group_mode == {F_mode}) && (t.is_v_rowmajor == {F_vlayout}) && (t.has_logits_soft_cap == {F_logits}) && ({F_mask_check}) && (t.bias_type == {F_bias_check}) && (t.has_lse == {F_lse})  && (t.has_dropout == {F_dropout}) && (t.do_fp8_static_quant == {F_squant}) && (t.fp8_dquant == {F_dquant}) && (t.skip_min_seqlen_q == {F_skip}) &&
                         ({F_scheck}) && ({F_skcheck}) && ({F_dcheck}) && ({F_dvcheck}) && ({F_constraint})) {{
-                using trait_ = fmha_fwd_traits_<{F_hdim}, {F_dtype}, {F_mode}, {F_bm0}, {F_bn0}, {F_bk0}, {F_bn1}, {F_bk1}, {F_bk0max}, {F_vlayout}, {F_pipeline_enum}, {F_logits}, {F_mask}, {F_bias}, {F_lse}, {F_dropout}, {F_squant}, {F_spad}, {F_skpad}, {F_dpad}, {F_dvpad}, {F_skip}>;
+                using trait_ = fmha_fwd_traits_<{F_hdim}, {F_dtype}, {F_mode}, {F_bm0}, {F_bn0}, {F_bk0}, {F_bn1}, {F_bk1}, {F_bk0max}, {F_vlayout}, {F_pipeline_enum}, {F_logits}, {F_mask}, {F_bias}, {F_lse}, {F_dropout}, {F_squant}, {F_dquant}, {F_spad}, {F_skpad}, {F_dpad}, {F_dvpad}, {F_skip}>;
                 return fmha_fwd_<trait_>(s, a);
             }}
 """
@@ -216,6 +269,7 @@ class FmhaFwdApiTrait:
     lse        : str  #
     dropout    : str
     squant     : str  #
+    dquant     : str  #
     spad       : str
     skpad      : str
     dpad       : str
@@ -226,7 +280,7 @@ class FmhaFwdApiTrait:
     @property
     def name(self) -> str:
         return f'{self.hdim}-{self.dtype}-{self.mode}-{self.bm0}-{self.bn0}-{self.bk0}-{self.bn0}-{self.bk1}-{self.bk0max}-'+\
-                    f'{self.vlayout}-{self.logits}-{self.mask}-{self.bias}-{self.lse}-{self.dropout}-{self.squant}-{self.spad}-{self.skpad}-{self.dpad}-{self.dvpad}-{self.skip}'
+                    f'{self.vlayout}-{self.logits}-{self.mask}-{self.bias}-{self.lse}-{self.dropout}-{self.squant}-{self.dquant}-{self.spad}-{self.skpad}-{self.dpad}-{self.dvpad}-{self.skip}'
 
     @property
     def scheck(self) -> str:
@@ -235,7 +289,7 @@ class FmhaFwdApiTrait:
             if self.spad == 't' : return 'true' # always support
             else :                return 'true'
         elif self.pipeline_tag in ['qr', 'qs']:
-            if self.spad == 't' : return f'true /*a.seqlen_q % {self.bm0} != 0*/'  # TODO: order of get_pipelines() matters! (ugly)
+            if self.spad == 't' : return f'a.seqlen_q % {self.bm0} != 0' # f'true /*a.seqlen_q % {self.bm0} != 0*/'  # TODO: order of get_pipelines() matters! (ugly)
             else :                return f'a.seqlen_q % {self.bm0} == 0'
         else: assert False
 
@@ -246,7 +300,7 @@ class FmhaFwdApiTrait:
             if self.skpad == 't' : return f'a.seqlen_k == 0 || a.seqlen_k % {self.bn0} != 0'
             else :                 return f'a.seqlen_k != 0 && a.seqlen_k % {self.bn0} == 0'
         elif self.pipeline_tag in ['qr', 'qs']:
-            if self.skpad == 't' : return f'true /*a.seqlen_k % {self.bn0} != 0*/' # TODO: order of get_pipelines() matters! (ugly)
+            if self.skpad == 't' : return f'a.seqlen_k % {self.bn0} != 0' # f'true /*a.seqlen_k % {self.bn0} != 0*/' # TODO: order of get_pipelines() matters! (ugly)
             else :                return f'a.seqlen_k % {self.bn0} == 0'
         else: assert False
 
@@ -288,6 +342,7 @@ class FmhaFwdPipeline:
     F_lse        : str  #
     F_dropout    : str  #
     F_squant     : str  #
+    F_dquant     : str  #
     F_mask       : str  # value from MASK_MAP
     F_skip       : str  # true/false
     F_constraint : CppConstraint = field(default_factory=lambda: CppConstraint())
@@ -331,6 +386,8 @@ class FmhaFwdPipeline:
 
         if self.F_squant == 't' : n += '_squant'
         else: n += '_nsquant'
+        if self.F_dquant == 't' : n += '_dquant'
+        else: n += '_ndquant'
 
         return n
 
@@ -363,7 +420,7 @@ class FmhaFwdApiPool:
                                    F_pipeline_enum=PIPELINE_ENUM_MAP[trait.pipeline_tag], F_logits=BOOL_MAP[trait.logits], F_mask=get_mask_map(self.mask_impl)[trait.mask],
                                    F_mask_check=get_mask_check_map(self.mask_impl)[trait.mask], F_bias_check=BIAS_CHECK_MAP[trait.bias], F_bias=BIAS_MAP[trait.bias],
                                    F_lse=BOOL_MAP[trait.lse], F_dropout=BOOL_MAP[trait.dropout], F_skip=BOOL_MAP[trait.skip],
-                                   F_squant=BOOL_MAP[trait.squant], F_scheck=trait.scheck, F_skcheck=trait.skcheck, F_dcheck=trait.dcheck, F_dvcheck=trait.dvcheck,
+                                   F_squant=BOOL_MAP[trait.squant], F_dquant=BOOL_MAP[trait.dquant], F_scheck=trait.scheck, F_skcheck=trait.skcheck, F_dcheck=trait.dcheck, F_dvcheck=trait.dvcheck,
                                    F_constraint=trait.constraint,
                                    F_spad=BOOL_MAP[trait.spad], F_skpad=BOOL_MAP[trait.skpad], F_dpad=BOOL_MAP[trait.dpad], F_dvpad=BOOL_MAP[trait.dvpad],
                                    F_bm0=trait.bm0, F_bn0=trait.bn0, F_bk0=trait.bk0, F_bn1=trait.bn1, F_bk1=trait.bk1, F_bk0max=trait.bk0max,
@@ -453,6 +510,7 @@ class FmhaFwdKernel:
                 F_lse           = BOOL_MAP[self.F_pipeline.F_lse],
                 F_dropout       = BOOL_MAP[self.F_pipeline.F_dropout],
                 F_squant        = BOOL_MAP[self.F_pipeline.F_squant],
+                F_dquant        = BOOL_MAP[self.F_pipeline.F_dquant],
                 F_skip          = BOOL_MAP[self.F_pipeline.F_skip],
                 F_occupancy     = self.F_tile.F_occupancy,
                 F_pipeline_enum = PIPELINE_ENUM_MAP[self.F_pipeline.tag],
@@ -489,6 +547,7 @@ class FmhaFwdKernel:
                 lse=self.F_pipeline.F_lse,
                 dropout=self.F_pipeline.F_dropout,
                 squant=self.F_pipeline.F_squant,
+                dquant=self.F_pipeline.F_dquant,
                 spad=self.F_pipeline.F_spad,
                 skpad=self.F_pipeline.F_skpad,
                 dpad=self.F_pipeline.F_dpad,
@@ -514,9 +573,9 @@ class KernelComponentFactory:
             }
         elif dtype == 'fp8' or dtype == 'bf8':
             return {
-                (64,64 )  : [FmhaFwdTileSize(128, 64,  32, 64,  32,  64,   2, 1, 1,  2, 1, 1,  32, 32, 32,  32, 32, 32,  -1)],
+                # (64,64 )  : [FmhaFwdTileSize(128, 64,  32, 64,  32,  64,   2, 1, 1,  2, 1, 1,  32, 32, 32,  32, 32, 32,  -1)],
                 (128,128) : [FmhaFwdTileSize(128, 128, 32, 128, 32,  128,  4, 1, 1,  4, 1, 1,  32, 32, 32,  32, 32, 32,  -1)],
-                (256,256) : [FmhaFwdTileSize(128, 128, 32, 256, 32,  256,  4, 1, 1,  4, 1, 1,  32, 32, 32,  32, 32, 32,  -1)],
+                # (256,256) : [FmhaFwdTileSize(128, 128, 32, 256, 32,  256,  4, 1, 1,  4, 1, 1,  32, 32, 32,  32, 32, 32,  -1)],
             }
         else:
             return None
@@ -530,27 +589,28 @@ class KernelComponentFactory:
         # TODO: currently for qr pipeline, let 't' padding to appear later!!
         # TODO: how to design this more generic?
         squant = 't' if dtype == 'fp8' else 'f'
+        dquant = squant
         pipelines = []
         if dtype in ['fp16', 'bf16']:
             for logits, mask, bias, lse, dropout, skip in itertools.product(["t", "f"], get_mask_map(mask_impl).keys(), BIAS_MAP.keys(), ["t", "f"], ["t", "f"], ["t", "f"]):
                 if bias == "bias":
                     # TODO: rocm 6.2 compiler problem if using qr_async for bias case
-                    pipelines.append(FmhaFwdPipeline('qr', 'row', 'f', 'f', 'f', 'f', logits, bias, lse, dropout, squant, mask, skip))
-                    pipelines.append(FmhaFwdPipeline('qr', 'row', 't', 't', 't', 't', logits, bias, lse, dropout, squant, mask, skip))
-                    pipelines.append(FmhaFwdPipeline('qr', 'col', 'f', 'f', 'f', 'f', logits, bias, lse, dropout, squant, mask, skip))
-                    pipelines.append(FmhaFwdPipeline('qr', 'col', 't', 't', 't', 't', logits, bias, lse, dropout, squant, mask, skip))
+                    pipelines.append(FmhaFwdPipeline('qr', 'row', 'f', 'f', 'f', 'f', logits, bias, lse, dropout, squant, dquant, mask, skip))
+                    pipelines.append(FmhaFwdPipeline('qr', 'row', 't', 't', 't', 't', logits, bias, lse, dropout, squant, dquant, mask, skip))
+                    pipelines.append(FmhaFwdPipeline('qr', 'col', 'f', 'f', 'f', 'f', logits, bias, lse, dropout, squant, dquant, mask, skip))
+                    pipelines.append(FmhaFwdPipeline('qr', 'col', 't', 't', 't', 't', logits, bias, lse, dropout, squant, dquant, mask, skip))
                 else:
-                    pipelines.append(FmhaFwdPipeline('qr_async', 'row', 't', 'f', 't', 't', logits, bias, lse, dropout, squant, mask, skip))
-                    pipelines.append(FmhaFwdPipeline('qr_async', 'row', 't', 't', 't', 't', logits, bias, lse, dropout, squant, mask, skip))
-                    pipelines.append(FmhaFwdPipeline('qr_async', 'col', 't', 'f', 't', 't', logits, bias, lse, dropout, squant, mask, skip))
-                    pipelines.append(FmhaFwdPipeline('qr_async', 'col', 't', 't', 't', 't', logits, bias, lse, dropout, squant, mask, skip))
+                    pipelines.append(FmhaFwdPipeline('qr_async', 'row', 't', 'f', 't', 't', logits, bias, lse, dropout, squant, dquant, mask, skip))
+                    pipelines.append(FmhaFwdPipeline('qr_async', 'row', 't', 't', 't', 't', logits, bias, lse, dropout, squant, dquant, mask, skip))
+                    pipelines.append(FmhaFwdPipeline('qr_async', 'col', 't', 'f', 't', 't', logits, bias, lse, dropout, squant, dquant, mask, skip))
+                    pipelines.append(FmhaFwdPipeline('qr_async', 'col', 't', 't', 't', 't', logits, bias, lse, dropout, squant, dquant, mask, skip))
                 if receipt == 1 and bias != "bias":
-                    pipelines.append(FmhaFwdPipeline('qr', 'row', 't', 't', 't', 't', logits, bias, lse, dropout, squant, mask, skip)) # TODO: cover arbitraty hdim
-                    pipelines.append(FmhaFwdPipeline('qr', 'col', 't', 'f', 't', 't', logits, bias, lse, dropout, squant, mask, skip)) # TODO: cover arbitraty hdim
+                    pipelines.append(FmhaFwdPipeline('qr', 'row', 't', 't', 't', 't', logits, bias, lse, dropout, squant, dquant, mask, skip)) # TODO: cover arbitraty hdim
+                    pipelines.append(FmhaFwdPipeline('qr', 'col', 't', 'f', 't', 't', logits, bias, lse, dropout, squant, dquant, mask, skip)) # TODO: cover arbitraty hdim
         elif dtype in ['fp8', 'bf8']:
             # no need lse/dropout kernels
-            for logits, mask, bias in itertools.product(["t", "f"], get_mask_map(mask_impl).keys(), BIAS_MAP.keys()):
-                pipelines.append(FmhaFwdPipeline('qr', 'col', 'f', 'f', 'f', 'f', logits, bias, 'f', 'f', squant, mask, 'f'))
+            for spad, skpad, logits, lse, mask, bias in itertools.product(["t", "f"], ["t", "f"], ["t", "f"], ["t", "f"], get_mask_map(mask_impl).keys(), BIAS_MAP.keys()):
+                pipelines.append(FmhaFwdPipeline('qr', 'col', spad, skpad, 'f', 'f', logits, bias, lse, 'f', squant, dquant, mask, 'f'))
         elif dtype in ['fp8fp16', 'fp8bf16']:
             # TODO
             None
@@ -581,7 +641,7 @@ def get_fwd_blobs(kernel_filter : Optional[str], receipt, optdim_list, mask_impl
         for ((hdim, hdim_v), tiles), mode in itertools.product(d.items(), MODE_MAP.keys()):
             for tile, pipeline in itertools.product(tiles, factory.get_pipelines(dtype, hdim, hdim_v, receipt, mask_impl)):
                 if mode == "group":
-                    if pipeline.F_spad != 't' or pipeline.F_skpad != 't':
+                    if pipeline.F_spad != 't' or pipeline.F_skpad != 't' or pipeline.F_dquant == "t":
                         # in group mode, spad/skpad must be true, since we can't predict if seqlen of current batch need pad or not
                         continue
                 if (hdim, hdim_v) == (192, 128) or hdim == 160:
@@ -610,6 +670,7 @@ def get_fwd_blobs(kernel_filter : Optional[str], receipt, optdim_list, mask_impl
                     cond &= pipeline.F_vlayout == 'row'
                     cond &= pipeline.F_bias in ['no', 'alibi']
                     cond &= pipeline.F_squant == 'f'
+                    cond &= pipeline.F_dquant == 'f'
                     cond &= pipeline.F_skip == 'f'
                     if not cond:
                         continue
@@ -619,6 +680,7 @@ def get_fwd_blobs(kernel_filter : Optional[str], receipt, optdim_list, mask_impl
                     cond &= pipeline.F_vlayout == 'row'
                     cond &= pipeline.F_bias in ['no', 'bias']
                     cond &= pipeline.F_squant == 'f'
+                    cond &= pipeline.F_dquant == 'f'
                     cond &= mode == 'batch'
                     cond &= pipeline.F_skip == 'f'
                     cond &= pipeline.F_logits == 'f'
@@ -630,6 +692,7 @@ def get_fwd_blobs(kernel_filter : Optional[str], receipt, optdim_list, mask_impl
                     cond &= mode == 'batch'
                     cond &= pipeline.F_vlayout == 'row'
                     cond &= pipeline.F_squant == 'f'
+                    cond &= pipeline.F_dquant == 'f'
                     if not cond:
                         continue
                 # Aiter(mha_varlen_fwd) integration
@@ -638,6 +701,7 @@ def get_fwd_blobs(kernel_filter : Optional[str], receipt, optdim_list, mask_impl
                     cond &= mode == 'group'
                     cond &= pipeline.F_vlayout == 'row'
                     cond &= pipeline.F_squant == 'f'
+                    cond &= pipeline.F_dquant == 'f'
                     if not cond:
                         continue
                 # aiter::mha_fwd C++ api integration
@@ -645,6 +709,7 @@ def get_fwd_blobs(kernel_filter : Optional[str], receipt, optdim_list, mask_impl
                     cond = dtype in ['fp16', 'bf16']
                     cond &= pipeline.F_vlayout == 'row'
                     cond &= pipeline.F_squant == 'f'
+                    cond &= pipeline.F_dquant == 'f'
                     if not cond:
                         continue
 

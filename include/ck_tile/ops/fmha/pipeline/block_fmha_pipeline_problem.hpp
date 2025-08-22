@@ -58,6 +58,7 @@ struct BlockFmhaPipelineProblem
     static constexpr bool kStoreLSE         = Traits::kStoreLSE;
     static constexpr bool kHasDropout       = Traits::kHasDropout;
     static constexpr bool kDoFp8StaticQuant = Traits::kDoFp8StaticQuant;
+    static constexpr bool kFp8DQuant = Traits::kFp8DQuant;
     static constexpr index_t kBlockPerCu    = Traits::kBlockPerCu;
 };
 

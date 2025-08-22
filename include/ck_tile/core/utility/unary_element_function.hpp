@@ -54,6 +54,11 @@ __host__ __device__ composes(Ts&&...) -> composes<remove_cvref_t<Ts>...>;
 template <typename SaturateType>
 struct saturates
 {
+    CK_TILE_HOST_DEVICE constexpr auto
+    operator()(const SaturateType& a_) const -> SaturateType
+    {
+        return a_;
+    }
     // NOTE: this function does not return SaturateType value
     // it is user's responsiblity to do further cast or not
     template <typename AccType>
