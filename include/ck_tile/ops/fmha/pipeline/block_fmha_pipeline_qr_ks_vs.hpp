@@ -30,6 +30,7 @@ struct BlockFmhaPipelineQRKSVS
     using ODataType             = remove_cvref_t<typename Problem::ODataType>;
     using AttentionVariant      = remove_cvref_t<typename Problem::AttentionVariant>;
     using FmhaMask              = remove_cvref_t<typename Problem::FmhaMask>;
+    static constexpr auto kFp8DQuant = Problem::kFp8DQuant;
 
     using BlockFmhaShape             = remove_cvref_t<typename Problem::BlockFmhaShape>;
     using VLayout                    = remove_cvref_t<typename BlockFmhaShape::VLayout>;
@@ -153,6 +154,11 @@ struct BlockFmhaPipelineQRKSVS
                const SAccElementFunction& s_acc_element_func,
                const PComputeElementFunction& p_compute_element_func,
                const OAccElementFunction& o_acc_element_func,
+               const float descale_q,
+               const float* descale_k_ptr,
+               const float* descale_v_ptr,
+               ck_tile::index_t stride_descale_k,
+               ck_tile::index_t stride_descale_v,
                FmhaMask mask,
                PositionEncoding position_encoding,
                float scale_s,
@@ -284,8 +290,20 @@ struct BlockFmhaPipelineQRKSVS
 
         static_assert(2 <= k0_loops);
         static_assert(1 <= k1_loops);
+
+        auto load_descale = [&](auto descale_ptr, auto iloops, auto stride_descale) {
+            if (kFp8DQuant) {
+                return *(descale_ptr + iloops * kN0 / 128 * stride_descale);
+            } else 
+                return .0f;
+        };
+        float descale_k = .0f, descale_v = .0f;
+
         do
         {
+            if constexpr(kFp8DQuant) {
+                descale_k = load_descale(descale_k_ptr, i_total_loops, stride_descale_k);
+            }
             // STAGE 1, QK gemm
             auto k_dram_window = make_tile_window(
                 k_dram_block_window.get_bottom_tensor_view(),
@@ -352,6 +370,12 @@ struct BlockFmhaPipelineQRKSVS
                                       sequence<kM0, k0_loops * kK0>{}),
                        k_lds_window);
             }
+
+if constexpr(kFp8DQuant)
+{
+            tile_elementwise_inout([descale_q, descale_k](auto& x) { x = x * descale_q * descale_k; }, s_acc);
+            descale_v = load_descale(descale_v_ptr, i_total_loops, stride_descale_v);
+}
 
             // STAGE 2, scale_s, add bias, mask, softmax
             if constexpr(BiasEnum == BlockAttentionBiasEnum::ELEMENTWISE_BIAS)
@@ -509,24 +533,24 @@ struct BlockFmhaPipelineQRKSVS
             constexpr auto o_spans = decltype(o_acc)::get_distributed_spans();
             sweep_tile_span(o_spans[number<0>{}], [&](auto idx0) {
                 constexpr auto i_idx = make_tuple(idx0);
+                const auto diff_m = m_old[i_idx] - get_validated_m(m[i_idx]);
 #if CK_TILE_FMHA_FWD_FAST_EXP2
                 const auto tmp = [&]() {
                     if constexpr(BiasEnum == BlockAttentionBiasEnum::ELEMENTWISE_BIAS ||
                                  BiasEnum == BlockAttentionBiasEnum::ALIBI)
                     {
-                        return exp2(m_old[i_idx] - get_validated_m(m[i_idx]));
+                        return exp2(diff_m);
                     }
                     else
                     {
                         if constexpr(kHasLogitsSoftCap)
                         {
 
-                            return exp2(m_old[i_idx] - get_validated_m(m[i_idx]));
+                            return exp2(diff_m);
                         }
                         else
                         {
-                            auto row_max = scale_s * get_validated_m(m[i_idx]);
-                            return exp2(scale_s * m_old[i_idx] - row_max);
+                            return exp2(scale_s * diff_m);
                         }
                     }
                 }();
@@ -566,8 +590,27 @@ struct BlockFmhaPipelineQRKSVS
             }
             move_tile_window(v_dram_window, {0, kK1});
 
+
             const auto p =
                 cast_tile<PDataType>(tile_elementwise_in(p_compute_element_func, p_compute));
+
+            auto wrapper_gemm1 = [&](auto& acc, auto a, auto b, auto descale) {
+                if constexpr(kFp8DQuant)
+                {
+                    auto acc0 = gemm_1(a, b);
+                    tile_elementwise_inout([&descale](auto& o, auto o0)
+                    {
+                        asm volatile(";wrapper_gemm1\n\tv_mul_f32_e32 %0, %1, %2"
+                            :"=v"(o)
+                            :"s"(descale), "v"(o0)
+                            :"memory"
+                        );
+                        // o += o0 * descale;
+                    }, acc, acc0);
+                } else {
+                    gemm_1(acc, a, b);
+                };
+            };
 
             // STAGE 3, KV gemm
             if constexpr(k1_loops > 1)
@@ -575,10 +618,10 @@ struct BlockFmhaPipelineQRKSVS
                 static_for<0, k1_loops - 1, 1>{}([&](auto i_k1) {
                     const auto v = load_tile(v_dram_window); // load next v
                     block_sync_lds();
-                    gemm_1(o_acc,
-                           get_slice_tile(
-                               p, sequence<0, i_k1 * kK1>{}, sequence<kM0, (i_k1 + 1) * kK1>{}),
-                           v_lds_window);
+                    wrapper_gemm1(o_acc,
+                        get_slice_tile(
+                            p, sequence<0, i_k1 * kK1>{}, sequence<kM0, (i_k1 + 1) * kK1>{}),
+                        v_lds_window, descale_v);
                     block_sync_lds();
                     if constexpr(std::is_same_v<VLayout, ck_tile::tensor_layout::gemm::RowMajor>)
                     {
@@ -602,9 +645,9 @@ struct BlockFmhaPipelineQRKSVS
             // tail
             {
                 block_sync_lds();
-                gemm_1(o_acc,
-                       get_slice_tile(p, sequence<0, (k1_loops - 1) * kK1>{}, sequence<kM0, kN0>{}),
-                       v_lds_window);
+                wrapper_gemm1(o_acc,
+                    get_slice_tile(p, sequence<0, (k1_loops - 1) * kK1>{}, sequence<kM0, kN0>{}),
+                    v_lds_window, descale_v);
                 block_sync_lds();
             }
         } while(++i_total_loops < num_total_loop);
@@ -705,6 +748,7 @@ struct BlockFmhaPipelineQRKSVS
                           identity{},
                           identity{},
                           identity{},
+                          0, nullptr, nullptr, 0, 0,
                           mask,
                           position_encoding,
                           scale_s,

@@ -70,6 +70,20 @@ struct naive_attention_fwd_args
     int page_size;      // if paged, the seqlen-kv per each block
     int max_pages_per_seq;
     int max_kv_tokens; // used as stride to access kv scale ptr
+
+    const float* descale_q_ptr; // descale quant
+    const float* descale_k_ptr;
+    const float* descale_v_ptr;
+
+    ck_tile::index_t stride_descale_q;
+    ck_tile::index_t stride_descale_k;
+    ck_tile::index_t stride_descale_v;
+    ck_tile::index_t nhead_stride_descale_q;
+    ck_tile::index_t nhead_stride_descale_k;
+    ck_tile::index_t nhead_stride_descale_v;
+    ck_tile::index_t batch_stride_descale_q;
+    ck_tile::index_t batch_stride_descale_k;
+    ck_tile::index_t batch_stride_descale_v;
 };
 
 // this is trait for host API

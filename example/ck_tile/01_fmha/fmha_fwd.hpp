@@ -17,6 +17,12 @@
 #include <utility>
 #include <variant>
 
+enum class QuantType {
+    nquant = 0,
+    squant,
+    dquant,
+};
+
 struct FmhaFwdFp16
 {
 };
@@ -43,6 +49,22 @@ struct FmhaFwdFp8Bf16
 
 template <typename DataType>
 struct FmhaFwdTypeConfig;
+
+template <>
+struct FmhaFwdTypeConfig<FmhaFwdFp8Fp16>
+{
+    using QDataType             = ck_tile::fp8_t;
+    using KDataType             = ck_tile::fp8_t;
+    using VDataType             = ck_tile::fp8_t;
+    using BiasDataType          = float;
+    using RandValOutputDataType = uint8_t;
+    using LSEDataType           = float; // data type for lse(logsumexp L_j = max_j + log(l_j))
+    using SaccDataType          = float; // data type for first gemm accumulation
+    using SMPLComputeDataType   = float; // data type for reduction, softmax
+    using PDataType             = ck_tile::fp8_t; // data type for A matrix of second gemm
+    using OaccDataType          = float;          // data type for second gemm accumulation
+    using ODataType             = float;
+};
 
 template <>
 struct FmhaFwdTypeConfig<FmhaFwdFp16>
@@ -89,7 +111,7 @@ struct FmhaFwdTypeConfig<FmhaFwdFp8>
     using SMPLComputeDataType   = float; // data type for reduction, softmax
     using PDataType             = ck_tile::fp8_t; // data type for A matrix of second gemm
     using OaccDataType          = float;          // data type for second gemm accumulation
-    using ODataType             = ck_tile::fp8_t;
+    using ODataType             = float; //ck_tile::fp8_t;
 };
 
 template <>
@@ -125,6 +147,20 @@ struct fmha_fwd_args
     void* rand_val_ptr;
     void* lse_ptr;
     void* o_ptr;
+
+    const float* descale_q_ptr; // descale quant
+    const float* descale_k_ptr;
+    const float* descale_v_ptr;
+
+    ck_tile::index_t stride_descale_q;
+    ck_tile::index_t stride_descale_k;
+    ck_tile::index_t stride_descale_v;
+    ck_tile::index_t nhead_stride_descale_q;
+    ck_tile::index_t nhead_stride_descale_k;
+    ck_tile::index_t nhead_stride_descale_v;
+    ck_tile::index_t batch_stride_descale_q;
+    ck_tile::index_t batch_stride_descale_k;
+    ck_tile::index_t batch_stride_descale_v;
 
     const void* seqstart_q_ptr;
     const void* seqstart_k_ptr;
@@ -498,6 +534,18 @@ auto fmha_fwd_create_kargs_and_grids(fmha_fwd_args args)
                                              args.scale_s,
                                              args.scale_p,
                                              args.scale_o,
+                                             args.descale_q_ptr,
+                                             args.descale_k_ptr,
+                                             args.descale_v_ptr,
+                                             args.stride_descale_q,
+                                             args.stride_descale_k,
+                                             args.stride_descale_v,
+                                             args.nhead_stride_descale_q,
+                                             args.nhead_stride_descale_k,
+                                             args.nhead_stride_descale_v,
+                                             args.batch_stride_descale_q,
+                                             args.batch_stride_descale_k,
+                                             args.batch_stride_descale_v,
                                              args.logits_soft_cap,
                                              args.stride_q,
                                              args.stride_k,
@@ -538,6 +586,18 @@ auto fmha_fwd_create_kargs_and_grids(fmha_fwd_args args)
                                              args.scale_s,
                                              args.scale_p,
                                              args.scale_o,
+                                             args.descale_q_ptr,
+                                             args.descale_k_ptr,
+                                             args.descale_v_ptr,
+                                             args.stride_descale_q,
+                                             args.stride_descale_k,
+                                             args.stride_descale_v,
+                                             args.nhead_stride_descale_q,
+                                             args.nhead_stride_descale_k,
+                                             args.nhead_stride_descale_v,
+                                             args.batch_stride_descale_q,
+                                             args.batch_stride_descale_k,
+                                             args.batch_stride_descale_v,
                                              args.logits_soft_cap,
                                              args.stride_q,
                                              args.stride_k,
@@ -1025,6 +1085,7 @@ template <ck_tile::index_t HDim_,
           bool kStoreLse_,
           bool kHasDropout_,
           bool kDoFp8StaticQuant_,
+          bool kFp8DQuant_,
           bool kPadS_,
           bool kPadSK_,
           bool kPadD_,
@@ -1241,6 +1302,7 @@ struct fmha_fwd_traits
     bool has_lse;
     bool has_dropout;
     bool do_fp8_static_quant;
+    bool fp8_dquant;
     bool skip_min_seqlen_q = false;
     // TODO: padding check is inside this api
 };
